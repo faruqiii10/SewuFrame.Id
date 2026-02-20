@@ -1,0 +1,586 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  onAuthStateChanged, 
+  signInAnonymously,
+  signInWithCustomToken,
+  signOut 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  onSnapshot, 
+  doc, 
+  deleteDoc, 
+  Timestamp,
+  setDoc,
+  getDoc
+} from 'firebase/firestore';
+import { 
+  LayoutDashboard, 
+  History, 
+  FileText, 
+  PlusCircle, 
+  MinusCircle, 
+  TrendingUp, 
+  Wallet, 
+  ArrowUpCircle, 
+  ArrowDownCircle,
+  Trash2,
+  Settings,
+  LogOut,
+  Download,
+  PieChart as PieChartIcon,
+  User,
+  CheckCircle2,
+  Sparkles,
+  Loader2,
+  Lightbulb,
+  BarChart3,
+  Instagram,
+  Tag,
+  X
+} from 'lucide-react';
+
+// --- Firebase & API Configuration ---
+// Catatan: Pastikan window.__firebase_config dan window.__app_id sudah didefinisikan di environment Anda
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+  apiKey: "YOUR_FIREBASE_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "ID",
+  appId: "APP_ID"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'sewu-frame-v2';
+const apiKey = "YOUR_GEMINI_API_KEY"; // Ganti dengan kunci API Gemini Anda
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  const [transactions, setTransactions] = useState([]);
+  const [activeTab, setActiveTab] = useState('summary');
+  const [loading, setLoading] = useState(true);
+  const [userSettings, setUserSettings] = useState({
+    monthlyTarget: 5000000,
+    chartType: 'bar',
+    enabledFeatures: {
+      monthlyTarget: true,
+      charts: true,
+      reports: true
+    }
+  });
+
+  // AI States
+  const [aiAnalysis, setAiAnalysis] = useState(null);
+  const [aiPromo, setAiPromo] = useState(null);
+  const [aiCaption, setAiCaption] = useState(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isGeneratingPromo, setIsGeneratingPromo] = useState(false);
+  const [isGeneratingCaption, setIsGeneratingCaption] = useState(false);
+
+  // Form States
+  const [incomeSource, setIncomeSource] = useState('Namuin');
+  const [serviceType, setServiceType] = useState('Foto');
+  const [selectedPrice, setSelectedPrice] = useState(30000);
+  const [incomeUnits, setIncomeUnits] = useState(1);
+  const [expenseDesc, setExpenseDesc] = useState('');
+  const [expenseAmount, setExpenseAmount] = useState('');
+
+  // 1. Auth Logic
+  const performLogin = async () => {
+    setLoading(true);
+    try {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    } catch (err) {
+      console.error("Auth error:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    performLogin();
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+        try {
+          const settingsDoc = await getDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'config'));
+          if (settingsDoc.exists()) {
+            setUserSettings(settingsDoc.data());
+          }
+        } catch (e) {
+          console.error("Error loading settings:", e);
+        }
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (serviceType === 'Extra Print') {
+      setSelectedPrice(10000);
+    } else {
+      setSelectedPrice(30000);
+    }
+  }, [serviceType]);
+
+  const handleLogout = async () => {
+    await signOut(auth);
+  };
+
+  // 2. Data Fetching
+  useEffect(() => {
+    if (!user) return;
+    const q = collection(db, 'artifacts', appId, 'users', user.uid, 'transactions');
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        date: doc.data().date?.toDate() || new Date()
+      }));
+      setTransactions(data.sort((a, b) => b.date - a.date));
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- Calculations ---
+  const stats = useMemo(() => {
+    const income = transactions.filter(t => t.type === 'pemasukan');
+    const totalIncome = income.reduce((sum, t) => sum + t.amount, 0);
+    const totalExpense = transactions.filter(t => t.type === 'pengeluaran').reduce((sum, t) => sum + t.amount, 0);
+    const now = new Date();
+    const monthlyIncome = income
+      .filter(t => t.date.getMonth() === now.getMonth() && t.date.getFullYear() === now.getFullYear())
+      .reduce((sum, t) => sum + t.amount, 0);
+
+    return {
+      totalIncome,
+      totalExpense,
+      balance: totalIncome - totalExpense,
+      monthlyIncome,
+      progress: userSettings.monthlyTarget ? Math.min((monthlyIncome / userSettings.monthlyTarget) * 100, 100) : 0,
+      totalFoto: income.filter(t => t.service === 'Foto').reduce((sum, t) => sum + t.units, 0),
+      totalExtraPrint: income.filter(t => t.service === 'Extra Print').reduce((sum, t) => sum + t.units, 0)
+    };
+  }, [transactions, userSettings.monthlyTarget]);
+
+  const chartData = useMemo(() => {
+    const days = [...Array(7)].map((_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      return d.toLocaleDateString('id-ID', { weekday: 'short' });
+    }).reverse();
+    const values = days.map(day => transactions
+      .filter(t => t.type === 'pemasukan' && t.date.toLocaleDateString('id-ID', { weekday: 'short' }) === day)
+      .reduce((sum, t) => sum + t.amount, 0)
+    );
+    const sources = ['Namuin', 'Maliosewu'];
+    const sourceIncome = sources.map(s => transactions
+      .filter(t => t.type === 'pemasukan' && t.source === s)
+      .reduce((sum, t) => sum + t.amount, 0)
+    );
+    const totalSourceIncome = sourceIncome.reduce((a, b) => a + b, 0);
+    const sourcePercentages = sourceIncome.map(val => totalSourceIncome > 0 ? (val / totalSourceIncome) * 100 : 0);
+
+    return { 
+      days, 
+      values, 
+      max: Math.max(...values, 100000),
+      sourceLabels: sources,
+      sourceValues: sourceIncome,
+      sourcePercentages
+    };
+  }, [transactions]);
+
+  // --- Gemini AI Features ---
+  const callGemini = async (prompt, retries = 5, delay = 1000) => {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      });
+      
+      if (!response.ok) throw new Error('API Error');
+      const result = await response.json();
+      return result.candidates?.[0]?.content?.parts?.[0]?.text;
+    } catch (err) {
+      if (retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return callGemini(prompt, retries - 1, delay * 2);
+      }
+      throw err;
+    }
+  };
+
+  const getAIAnalysis = async () => {
+    if (transactions.length === 0) return;
+    setIsAnalyzing(true);
+    const summary = {
+      income: stats.totalIncome,
+      expense: stats.totalExpense,
+      profit: stats.balance,
+      topService: stats.totalFoto > stats.totalExtraPrint ? "Sesi Foto" : "Extra Print",
+      locDistribution: chartData.sourcePercentages
+    };
+    const prompt = `Analisis kesehatan bisnis photobooth 'Sewu Frame' berdasarkan data ini: ${JSON.stringify(summary)}. Berikan 3 poin analisis tajam dan 1 saran prioritas. Gunakan gaya bahasa mentor bisnis yang keren.`;
+    try {
+      const res = await callGemini(prompt);
+      setAiAnalysis(res);
+    } catch (e) {
+      setAiAnalysis("Gagal memuat analisis cerdas.");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const generatePromoIdea = async () => {
+    setIsGeneratingPromo(true);
+    const prompt = `Buatkan 2 ide promosi kreatif untuk bisnis photobooth bernama 'Sewu Frame' agar omset minggu depan meningkat. Target pasar: anak muda dan pasangan. Fokus pada lokasi di Namuin dan Maliosewu. Gunakan gaya bahasa marketing yang menarik.`;
+    try {
+      const res = await callGemini(prompt);
+      setAiPromo(res);
+      setActiveTab('summary');
+    } catch (e) {
+      setAiPromo("Gagal membuat ide promo.");
+    } finally {
+      setIsGeneratingPromo(false);
+    }
+  };
+
+  const generateCaption = async () => {
+    setIsGeneratingCaption(true);
+    const prompt = `Buatkan caption Instagram yang estetik dan sedikit humoris untuk bisnis photobooth 'Sewu Frame'. Konteks: Hari ini terjual ${stats.totalFoto} sesi foto. Ajak orang untuk datang ke lokasi Namuin atau Maliosewu. Tambahkan hashtag relevan.`;
+    try {
+      const res = await callGemini(prompt);
+      setAiCaption(res);
+    } catch (e) {
+      setAiCaption("Gagal membuat caption.");
+    } finally {
+      setIsGeneratingCaption(false);
+    }
+  };
+
+  // Actions
+  const handleAddIncome = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+    const amount = selectedPrice * incomeUnits;
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), {
+      type: 'pemasukan',
+      source: incomeSource,
+      service: serviceType,
+      units: incomeUnits,
+      unitPrice: selectedPrice,
+      amount: amount,
+      date: Timestamp.fromDate(new Date()),
+      description: `${incomeSource} - ${serviceType} @${selectedPrice}`
+    });
+    setIncomeUnits(1);
+  };
+
+  const handleAddExpense = async (e) => {
+    e.preventDefault();
+    if (!user || !expenseAmount || !expenseDesc) return;
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), {
+      type: 'pengeluaran',
+      amount: parseInt(expenseAmount),
+      description: expenseDesc,
+      date: Timestamp.fromDate(new Date()),
+      category: 'Operasional'
+    });
+    setExpenseAmount('');
+    setExpenseDesc('');
+  };
+
+  const handleDelete = async (id) => {
+    if (!user) return;
+    if (window.confirm("Hapus transaksi ini?")) {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', id));
+    }
+  };
+
+  const formatIDR = (num) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(num);
+
+  // Render Logic
+  if (loading) return (
+    <div className="flex items-center justify-center h-screen bg-white">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#008D4C] mx-auto mb-4"></div>
+        <p className="text-slate-600 font-black italic uppercase">Sewu Frame Cloud...</p>
+      </div>
+    </div>
+  );
+
+  if (!user) return (
+    <div className="flex items-center justify-center h-screen bg-slate-100 p-6">
+      <div className="bg-white p-10 rounded-[40px] shadow-2xl max-w-md w-full text-center">
+        <div className="bg-[#FFD700] p-6 rounded-3xl inline-block mb-8"><User size={48} className="text-slate-900" /></div>
+        <h2 className="text-2xl font-black text-slate-800 mb-4">Akses Tersimpan</h2>
+        <button onClick={performLogin} className="w-full py-5 rounded-[24px] font-black bg-[#FFD700] text-slate-900 shadow-lg active:scale-95">Mulai Sekarang</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
+      {/* Sidebar */}
+      <aside className="w-80 bg-[#FFD700] flex flex-col shadow-2xl z-20">
+        <div className="p-8">
+          <div className="mb-10 flex items-center gap-4">
+             <div className="bg-white p-2 rounded-2xl shadow-md border-2 border-slate-900">
+               <h1 className="text-xl font-black text-slate-900 leading-none tracking-tighter">SF</h1>
+             </div>
+             <h2 className="text-2xl font-black text-slate-900 tracking-tighter">Sewu Frame</h2>
+          </div>
+          <nav className="space-y-3">
+            {[
+              { id: 'summary', icon: <LayoutDashboard size={20}/>, label: 'Dashboard' },
+              { id: 'history', icon: <History size={20}/>, label: 'Riwayat Transaksi' },
+              { id: 'settings', icon: <Settings size={20}/>, label: 'Pengaturan' }
+            ].map(tab => (
+              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`w-full flex items-center gap-4 px-6 py-4 rounded-[20px] font-black transition-all ${activeTab === tab.id ? 'bg-white text-[#008D4C] shadow-xl scale-105' : 'text-slate-900 hover:bg-white/40'}`}>
+                {tab.icon} {tab.label}
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        <div className="mt-auto p-8 bg-black/5 rounded-t-[40px] space-y-4">
+          <div className="bg-white/40 p-4 rounded-[24px] border border-white/20 space-y-2">
+            <h4 className="text-[10px] font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
+              <Sparkles size={14} className="text-[#008D4C]"/> Fitur Cerdas AI
+            </h4>
+            <div className="grid grid-cols-1 gap-2">
+              <button onClick={getAIAnalysis} disabled={isAnalyzing || transactions.length === 0} className="w-full py-2 bg-[#008D4C] text-white rounded-xl text-[10px] font-black shadow hover:brightness-110 flex items-center justify-center gap-2 disabled:opacity-50 transition-all">
+                {isAnalyzing ? <Loader2 size={12} className="animate-spin" /> : <Lightbulb size={12} />} ✨ Analisis Strategi
+              </button>
+              <button onClick={generatePromoIdea} disabled={isGeneratingPromo} className="w-full py-2 bg-slate-900 text-white rounded-xl text-[10px] font-black shadow hover:brightness-110 flex items-center justify-center gap-2 disabled:opacity-50 transition-all">
+                {isGeneratingPromo ? <Loader2 size={12} className="animate-spin" /> : <Tag size={12} />} ✨ Ide Promo AI
+              </button>
+            </div>
+          </div>
+          
+          <div className="pt-4 border-t border-slate-900/10 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-2xl bg-slate-900 flex items-center justify-center text-[#FFD700] text-sm font-black">{user.displayName ? user.displayName.charAt(0) : 'S'}</div>
+              <div className="text-[10px]"><p className="font-black text-slate-900 uppercase">Cloud Sync</p><p className="text-slate-700 opacity-70">Aktif</p></div>
+            </div>
+            <button onClick={handleLogout} className="p-2 text-slate-900 hover:text-red-700"><LogOut size={18} /></button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 overflow-y-auto">
+        <header className="bg-white/80 backdrop-blur-md border-b px-10 py-6 flex items-center justify-between sticky top-0 z-10">
+          <h1 className="text-3xl font-black text-slate-900 tracking-tighter capitalize">{activeTab}</h1>
+          <button onClick={generateCaption} disabled={isGeneratingCaption || transactions.length === 0} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-full text-[10px] font-black uppercase tracking-widest shadow-lg hover:brightness-110 transition-all disabled:opacity-50">
+            {isGeneratingCaption ? <Loader2 size={14} className="animate-spin" /> : <Instagram size={14} />} ✨ Buat Caption IG
+          </button>
+        </header>
+
+        <div className="p-10 max-w-7xl mx-auto space-y-10">
+          {/* AI Result Cards */}
+          {(aiAnalysis || aiPromo || aiCaption) && activeTab === 'summary' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in slide-in-from-top duration-500">
+              {aiAnalysis && (
+                <div className="bg-emerald-900 text-emerald-50 p-6 rounded-[32px] shadow-xl relative overflow-hidden">
+                  <h4 className="text-xs font-black uppercase mb-3 flex items-center gap-2 text-[#FFD700]"><Sparkles size={14}/> Strategi Bisnis</h4>
+                  <p className="text-xs leading-relaxed whitespace-pre-wrap">{aiAnalysis}</p>
+                  <button onClick={() => setAiAnalysis(null)} className="absolute top-4 right-4 text-emerald-300"><X size={16}/></button>
+                </div>
+              )}
+              {aiPromo && (
+                <div className="bg-slate-900 text-slate-50 p-6 rounded-[32px] shadow-xl relative overflow-hidden">
+                  <h4 className="text-xs font-black uppercase mb-3 flex items-center gap-2 text-[#FFD700]"><Tag size={14}/> Ide Promo AI</h4>
+                  <p className="text-xs leading-relaxed whitespace-pre-wrap">{aiPromo}</p>
+                  <button onClick={() => setAiPromo(null)} className="absolute top-4 right-4 text-slate-400"><X size={16}/></button>
+                </div>
+              )}
+              {aiCaption && (
+                <div className="bg-gradient-to-br from-purple-600 to-pink-600 text-white p-6 rounded-[32px] shadow-xl relative overflow-hidden">
+                  <h4 className="text-xs font-black uppercase mb-3 flex items-center gap-2"><Instagram size={14}/> Instagram Caption</h4>
+                  <p className="text-xs leading-relaxed whitespace-pre-wrap">{aiCaption}</p>
+                  <button onClick={() => setAiCaption(null)} className="absolute top-4 right-4 text-white/50"><X size={16}/></button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'summary' && (
+            <>
+              {/* Quick Stats */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <div className="bg-white p-8 rounded-[32px] shadow-sm border-b-4 border-[#008D4C]">
+                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Total Saldo</p>
+                   <h3 className="text-2xl font-black text-slate-900">{formatIDR(stats.balance)}</h3>
+                </div>
+                <div className="bg-white p-8 rounded-[32px] shadow-sm">
+                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Omset Bulan Ini</p>
+                   <h3 className="text-2xl font-black text-[#008D4C]">{formatIDR(stats.monthlyIncome)}</h3>
+                </div>
+                <div className="bg-white p-8 rounded-[32px] shadow-sm">
+                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Total Foto</p>
+                   <h3 className="text-2xl font-black text-slate-900">{stats.totalFoto} <span className="text-sm">Sesi</span></h3>
+                </div>
+                <div className="bg-white p-8 rounded-[32px] shadow-sm">
+                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Extra Print</p>
+                   <h3 className="text-2xl font-black text-slate-900">{stats.totalExtraPrint} <span className="text-sm">Pcs</span></h3>
+                </div>
+              </div>
+
+              {/* Entry Forms */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div className="bg-white p-8 rounded-[40px] shadow-xl border border-slate-100">
+                  <div className="flex items-center gap-4 mb-8">
+                    <div className="bg-emerald-100 p-3 rounded-2xl text-emerald-600"><PlusCircle /></div>
+                    <h3 className="text-xl font-black text-slate-900">Input Pemasukan</h3>
+                  </div>
+                  <form onSubmit={handleAddIncome} className="space-y-6">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black uppercase text-slate-400 block mb-2">Lokasi</label>
+                        <select value={incomeSource} onChange={(e) => setIncomeSource(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl p-4 font-bold text-slate-900 focus:ring-2 focus:ring-[#008D4C]">
+                          <option>Namuin</option>
+                          <option>Maliosewu</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black uppercase text-slate-400 block mb-2">Layanan</label>
+                        <select value={serviceType} onChange={(e) => setServiceType(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl p-4 font-bold text-slate-900 focus:ring-2 focus:ring-[#008D4C]">
+                          <option>Foto</option>
+                          <option>Extra Print</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black uppercase text-slate-400 block mb-2">Jumlah Unit</label>
+                        <input type="number" min="1" value={incomeUnits} onChange={(e) => setIncomeUnits(parseInt(e.target.value))} className="w-full bg-slate-50 border-none rounded-2xl p-4 font-bold" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black uppercase text-slate-400 block mb-2">Total Harga</label>
+                        <div className="bg-slate-100 p-4 rounded-2xl font-black text-emerald-600">{formatIDR(selectedPrice * incomeUnits)}</div>
+                      </div>
+                    </div>
+                    <button type="submit" className="w-full py-4 bg-[#008D4C] text-white rounded-[20px] font-black shadow-lg hover:brightness-110 active:scale-95 transition-all">Simpan Pemasukan</button>
+                  </form>
+                </div>
+
+                <div className="bg-white p-8 rounded-[40px] shadow-xl border border-slate-100">
+                  <div className="flex items-center gap-4 mb-8">
+                    <div className="bg-red-100 p-3 rounded-2xl text-red-600"><MinusCircle /></div>
+                    <h3 className="text-xl font-black text-slate-900">Input Pengeluaran</h3>
+                  </div>
+                  <form onSubmit={handleAddExpense} className="space-y-6">
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-400 block mb-2">Keterangan</label>
+                      <input type="text" value={expenseDesc} onChange={(e) => setExpenseDesc(e.target.value)} placeholder="Contoh: Kertas Film / Parkir" className="w-full bg-slate-50 border-none rounded-2xl p-4 font-bold" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-400 block mb-2">Nominal (Rp)</label>
+                      <input type="number" value={expenseAmount} onChange={(e) => setExpenseAmount(e.target.value)} placeholder="0" className="w-full bg-slate-50 border-none rounded-2xl p-4 font-bold" />
+                    </div>
+                    <button type="submit" className="w-full py-4 bg-slate-900 text-white rounded-[20px] font-black shadow-lg hover:brightness-110 active:scale-95 transition-all">Catat Pengeluaran</button>
+                  </form>
+                </div>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="bg-white rounded-[40px] shadow-xl overflow-hidden border border-slate-100">
+              <div className="p-8 border-b flex justify-between items-center bg-slate-50/50">
+                <h3 className="font-black text-slate-900">Data Transaksi</h3>
+                <button onClick={() => {
+                   const headers = ['Tanggal', 'Deskripsi', 'Tipe', 'Total'];
+                   const csv = [headers, ...transactions.map(t => [t.date.toLocaleDateString(), t.description, t.type, t.amount])].map(e => e.join(",")).join("\n");
+                   const blob = new Blob([csv], { type: 'text/csv' });
+                   const url = URL.createObjectURL(blob);
+                   const a = document.createElement('a');
+                   a.href = url; a.download = 'Laporan_SewuFrame.csv'; a.click();
+                }} className="flex items-center gap-2 text-[10px] font-black uppercase bg-white px-4 py-2 rounded-xl shadow-sm border hover:bg-slate-50">
+                  <Download size={14}/> Export CSV
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                      <th className="px-8 py-4">Tanggal</th>
+                      <th className="px-8 py-4">Keterangan</th>
+                      <th className="px-8 py-4">Tipe</th>
+                      <th className="px-8 py-4">Jumlah</th>
+                      <th className="px-8 py-4 text-center">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {transactions.map((t) => (
+                      <tr key={t.id} className="hover:bg-slate-50/50 transition-colors">
+                        <td className="px-8 py-4 text-xs font-bold text-slate-500">{t.date.toLocaleDateString('id-ID')}</td>
+                        <td className="px-8 py-4 text-xs font-black text-slate-800">{t.description}</td>
+                        <td className="px-8 py-4">
+                          <span className={`text-[9px] font-black uppercase px-3 py-1 rounded-full ${t.type === 'pemasukan' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                            {t.type}
+                          </span>
+                        </td>
+                        <td className={`px-8 py-4 text-xs font-black ${t.type === 'pemasukan' ? 'text-emerald-600' : 'text-red-600'}`}>
+                          {t.type === 'pemasukan' ? '+' : '-'} {formatIDR(t.amount)}
+                        </td>
+                        <td className="px-8 py-4 text-center">
+                          <button onClick={() => handleDelete(t.id)} className="p-2 text-slate-300 hover:text-red-600 transition-colors"><Trash2 size={16} /></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <div className="bg-white p-10 rounded-[40px] shadow-xl border border-slate-100 max-w-2xl">
+              <h3 className="text-xl font-black text-slate-900 mb-8">Konfigurasi Aplikasi</h3>
+              <div className="space-y-8">
+                <div>
+                  <label className="text-[10px] font-black uppercase text-slate-400 block mb-4">Target Omset Bulanan (Rp)</label>
+                  <input 
+                    type="number" 
+                    value={userSettings.monthlyTarget} 
+                    onChange={(e) => setUserSettings({...userSettings, monthlyTarget: parseInt(e.target.value)})}
+                    className="w-full bg-slate-50 border-none rounded-2xl p-4 font-black text-xl text-[#008D4C]"
+                  />
+                </div>
+                <button 
+                  onClick={() => {
+                    setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config'), userSettings);
+                    alert("Pengaturan disimpan!");
+                  }}
+                  className="w-full py-4 bg-slate-900 text-white rounded-[20px] font-black shadow-lg"
+                >
+                  Simpan Perubahan
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+};
+
+export default App;
